@@ -1,17 +1,18 @@
-# Okta Identity Lifecycle Management — Joiner Mover Leaver (JML) with BambooHR and SCIM Provisioning
+# Okta Identity Lifecycle Management — Joiner Mover Leaver (JML)
+### BambooHR · Okta · SterlingBank · scim.dev
 
-> A hands-on implementation of a complete enterprise identity lifecycle using Okta as the Identity Provider, BambooHR as the authoritative HR source, and a Sterling Bank SCIM application as the downstream resource server. This lab demonstrates automated user provisioning, attribute synchronisation, group-based access control, and deprovisioning across all three phases of the JML lifecycle.
+> A hands-on implementation of a complete enterprise identity lifecycle using Okta as the Identity Provider, BambooHR as the authoritative HR source, and a SterlingBank application as the downstream resource server. This lab demonstrates automated user provisioning, attribute synchronisation, group-based access control, and deprovisioning — validated end-to-end using scim.dev as a live SCIM 2.0 test sink.
 
 ---
 
 ## 📋 Table of Contents
 
 - [Overview](#overview)
-- [Architecture and Data Flow](#architecture-and-data-flow)
+- [System Architecture](#system-architecture)
 - [JML Lifecycle Flow](#jml-lifecycle-flow)
 - [Prerequisites](#prerequisites)
 - [Lab Steps](#lab-steps)
-  - [Step 1 — Connect BambooHR to Okta (HR Integration)](#step-1--connect-bamboohr-to-okta-hr-integration)
+  - [Step 1 — Connect BambooHR to Okta](#step-1--connect-bamboohr-to-okta)
   - [Step 2 — Configure Import and Lifecycle Sourcing Rules](#step-2--configure-import-and-lifecycle-sourcing-rules)
   - [Step 3 — Import Users from BambooHR](#step-3--import-users-from-bamboohr)
   - [Step 4 — Create a Dynamic Group in Okta](#step-4--create-a-dynamic-group-in-okta)
@@ -23,8 +24,8 @@
   - [Step 10 — Test the Mover Workflow](#step-10--test-the-mover-workflow)
   - [Step 11 — Test the Leaver Workflow](#step-11--test-the-leaver-workflow)
 - [Screenshots](#screenshots)
-- [Best Practices Summary](#best-practices-summary)
 - [JML Workflow Reference](#jml-workflow-reference)
+- [Best Practices Summary](#best-practices-summary)
 - [Key Concepts Reference](#key-concepts-reference)
 - [Resources](#resources)
 
@@ -32,59 +33,85 @@
 
 ## Overview
 
-This lab implements a **Joiner Mover Leaver (JML) identity lifecycle** — the foundational pattern of enterprise IAM — using three systems in an automated provisioning chain:
+This lab implements a **Joiner Mover Leaver (JML) identity lifecycle** — the foundational pattern of enterprise IAM — across three systems in an automated, unidirectional provisioning chain:
 
 | System | Role | Responsibility |
 |---|---|---|
-| **BambooHR** | Authoritative Source (HR System of Record) | Owns employee identity data — creates, updates, and terminates employees |
-| **Okta** | Identity Provider (IdP) / Identity Broker | Receives identity events from BambooHR, enforces group membership rules, and pushes access to downstream applications |
-| **Sterling Bank Application** | Resource Server (Service Provider) | Receives provisioned users from Okta via SCIM; grants application access based on group membership and role attributes |
+| **BambooHR** | Authoritative Source — HR System of Record | Owns employee identity data. Creates, updates, and terminates employee records. All identity events originate here. |
+| **Okta** | Identity Broker — Identity Provider (IdP) | Receives employee records from BambooHR on a scheduled import. Evaluates dynamic group membership rules. Pushes provisioning events downstream via SCIM. |
+| **SterlingBank App** | Resource Server — Service Provider (SP) | Receives provisioned users from Okta via SCIM 2.0. Grants application access based on group membership. Validated in this lab using scim.dev as the SCIM endpoint. |
 
-**The core principle:** Identity data flows in one direction — from HR (the authoritative source) downstream to applications. No application creates or owns identity data. HR is always the source of truth.
+**The foundational principle:** Identity data flows in one direction only — from HR downstream to applications. No application creates or owns identity data. BambooHR is always the single source of truth.
 
 ---
 
-## Architecture and Data Flow
+## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          IDENTITY LIFECYCLE ARCHITECTURE                    │
-└─────────────────────────────────────────────────────────────────────────────┘
+╔═════════════════════════════════════════════════════════════════════════════╗
+║              OKTA JML LIFECYCLE — SYSTEM ARCHITECTURE                      ║
+╚═════════════════════════════════════════════════════════════════════════════╝
 
-                    AUTHORITATIVE            IDENTITY              RESOURCE
-                       SOURCE                BROKER                SERVER
-                    ┌───────────┐         ┌──────────┐          ┌───────────┐
-                    │           │  Import  │          │   SCIM   │           │
-                    │ BambooHR  │─────────►│   Okta   │─────────►│SterlingBank│
-                    │           │ (hourly  │   (IdP)  │  Push    │    App     │
-                    │ HR System │  sync)   │          │          │            │
-                    └───────────┘         └──────────┘          └─────────────┘
-                          │                    │                      │
-                    Employees,           Dynamic Groups,         User Accounts,
-                    Departments,         Attribute Rules,        Role Attributes,
-                    Job Titles           Profile Mapping         Access Control
-
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          DETAILED DATA FLOW                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
-
-BambooHR                    Okta                           SterlingBank
-──────────                  ──────────────────────────     ──────────────────
-Employee record             ① Import user profile          ① SCIM creates user
-  firstName                     ↓                              account
-  lastName             ② Evaluate group rules:            ② Attribute mapping
-  department               IF dept = "IT"                      applied:
-  title                    AND title = "Senior Dev"            title → role
-  email                    → add to SterlingBank IT Admin      ③ User accesses app
-    │                          Group                           with correct
-    │                          ↓                              permissions
-    └──────────────────► ③ Group assigned to SterlingBank
-                             application
-                             ↓
-                         ④ SCIM push triggers
-                             user creation
-                             in SterlingBank
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                        AUTHORITATIVE SOURCE                             │
+  │                                                                         │
+  │   ┌──────────────────────────────────────────────────────────────────┐  │
+  │   │                        BambooHR                                  │  │
+  │   │                                                                  │  │
+  │   │   Employee Records                                               │  │
+  │   │   ┌──────────┐  ┌────────────┐  ┌───────────┐  ┌─────────────┐ │  │
+  │   │   │firstName │  │ lastName   │  │department │  │    title    │ │  │
+  │   │   └──────────┘  └────────────┘  └───────────┘  └─────────────┘ │  │
+  │   │   ┌──────────┐  ┌────────────┐                                  │  │
+  │   │   │  email   │  │   status   │                                  │  │
+  │   │   └──────────┘  └────────────┘                                  │  │
+  │   └──────────────────────────┬───────────────────────────────────────┘  │
+  └────────────────────────────  │  ───────────────────────────────────────┘
+                                 │
+                    Scheduled Import (hourly)
+                    Full sync — no real-time webhook
+                                 │
+  ┌─────────────────────────────▼───────────────────────────────────────────┐
+  │                         IDENTITY BROKER                                 │
+  │                                                                         │
+  │   ┌──────────────────────────────────────────────────────────────────┐  │
+  │   │                           Okta                                   │  │
+  │   │                                                                  │  │
+  │   │  ① Import user profile from BambooHR                            │  │
+  │   │              │                                                   │  │
+  │   │              ▼                                                   │  │
+  │   │  ② Evaluate dynamic group rule:                                  │  │
+  │   │                                                                  │  │
+  │   │     IF user.department == "IT"                                   │  │
+  │   │     AND user.title == "security engineer"                         │  │
+  │   │     ─────────────────────────────────                            │  │
+  │   │     TRUE  → add to "SterlingBank IT Admin"                       │  │
+  │   │     FALSE → not assigned / removed                               │  │
+  │   │              │                                                   │  │
+  │   │              ▼                                                   │  │
+  │   │  ③ Group assigned to SterlingBank SCIM Practice App              │  │
+  │   │              │                                                   │  │
+  │   │              ▼                                                   │  │
+  │   │  ④ SCIM provisioning event triggered                             │  │
+  │   └──────────────────────────┬───────────────────────────────────────┘  │
+  └─────────────────────────── ─ │ ────────────────────────────────────────┘
+                                 │
+                    SCIM 2.0 over HTTPS
+                    POST / PATCH / GET
+                    Authorization: Bearer <api-key>
+                                 │
+  ┌─────────────────────────────▼───────────────────────────────────────────┐
+  │                         RESOURCE SERVER                                 │
+  │                                                                         │
+  │   ┌──────────────────────────────────────────────────────────────────┐  │
+  │   │              SterlingBank SCIM Practice App                      │  │
+  │   │              (validated via scim.dev sandbox)                    │  │
+  │   │                                                                  │  │
+  │   │  Joiner  → POST   /Users          → user account created         │  │
+  │   │  Mover   → PATCH  /Users/{id}     → user attributes updated      │  │
+  │   │  Leaver  → PATCH  /Users/{id}     → active: false                │  │
+  │   └──────────────────────────────────────────────────────────────────┘  │
+  └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -92,52 +119,60 @@ Employee record             ① Import user profile          ① SCIM creates us
 ## JML Lifecycle Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     JOINER ─── MOVER ─── LEAVER                            │
-└─────────────────────────────────────────────────────────────────────────────┘
+╔═════════════════════════════════════════════════════════════════════════════╗
+║                      JOINER · MOVER · LEAVER                               ║
+╚═════════════════════════════════════════════════════════════════════════════╝
 
-  JOINER                    MOVER                     LEAVER
-  ──────                    ─────                     ──────
-  New employee              Employee profile          Employee terminated
-  created in                updated in                or deleted in
-  BambooHR                  BambooHR                  BambooHR
-       │                         │                         │
-       ▼                         ▼                         ▼
-  Okta imports             Okta imports              Okta imports
-  user on next             delta on next             user removal
-  scheduled sync           scheduled sync            on next sync
-       │                         │                         │
-       ▼                         ▼                         ▼
-  Group rules              Group rules               User deactivated
-  evaluated —              re-evaluated —            in Okta
-  user added to            user moved                     │
-  matching groups          between groups                 ▼
-       │                   if criteria              User deactivated
-       ▼                   changed                  in SterlingBank via
-  SCIM pushes                   │                   SCIM deprovision
-  new user to                   ▼                        │
-  SterlingBank                  SCIM pushes               Session invalidated
-       │                   updated attrs             Access removed
-       ▼                   to SterlingBank
-  User can log                  │
-  into SterlingBank             User sees
-  via Okta SSO             updated profile
-                           and correct role
+  JOINER                      MOVER                       LEAVER
+  ──────────────────          ──────────────────          ──────────────────
+  New employee created        Employee profile            Employee terminated
+  in BambooHR                 updated in BambooHR         or deleted in
+  (dept=IT,                   (name, title,               BambooHR
+   title=Senior Dev)           department)
+          │                          │                           │
+          ▼                          ▼                           ▼
+  Okta scheduled              Okta scheduled              Okta scheduled
+  import detects              import detects              import detects
+  new user record             changed attributes          removed record
+          │                          │                           │
+          ▼                          ▼                           ▼
+  Dynamic group rule          Dynamic group rule          User deactivated
+  evaluated:                  re-evaluated:               in Okta
+  dept=IT ✅                  If attributes no longer          │
+  title=Senior Dev ✅         match rule criteria,             ▼
+  → Added to                  user removed from           User removed from
+    SterlingBank              SterlingBank IT Admin       SterlingBank
+    IT Admin group                   │                    IT Admin group
+          │                          ▼                           │
+          ▼                   SCIM PATCH sent to                 ▼
+  App assigned to user        scim.dev with             SCIM PATCH sent to
+  via group membership        updated attributes        scim.dev:
+          │                                             { "active": false }
+          ▼
+  SCIM POST /Users sent
+  to scim.dev:
+  user account created
+          │
+          ▼
+  User can authenticate
+  via Okta SSO and
+  access SterlingBank app
 ```
 
 ---
 
 ## Prerequisites
 
-- **Okta tenant** with Super Administrator access
-- **BambooHR tenant** with API access enabled and test employees populated
-- **SterlingBank application** (or equivalent custom app) with:
-  - A SCIM 2.0 endpoint (HTTPS required)
-  - Bearer token or HTTP header authentication for SCIM
-  - SAML SSO endpoint configured
-  - A tunnelling tool (e.g. ngrok) if running locally, to expose SCIM endpoint over HTTPS
-- BambooHR subdomain name (used during app integration setup)
-- At least one test employee in BambooHR with `department = IT` and `title = Senior Developer` to trigger the dynamic group rule
+| Requirement | Detail |
+|---|---|
+| **Okta tenant** | Developer or production org with Super Administrator access |
+| **BambooHR tenant** | Trial or production org with API access enabled; test employees pre-populated |
+| **BambooHR subdomain** | The prefix of your BambooHR URL (e.g. `wayneenterprise` from `wayneenterprise.bamboohr.com`) |
+| **scim.dev account** | Free — no sign-up required; API key generated on first visit |
+| **Test employee** | At least one BambooHR employee with `department = IT` and `title = security engineer` to trigger the dynamic group rule |
+| **Okta P1 license** | Required for BambooHR provisioning and group rules (included in developer tenants) |
+
+> **No custom server, no Docker, no ngrok required.** This lab uses `scim.dev` as the SCIM endpoint — a free, browser-based SCIM 2.0 sandbox. All provisioning events are observed in real time through its HTTP log viewer.
 
 ---
 
@@ -145,192 +180,194 @@ Employee record             ① Import user profile          ① SCIM creates us
 
 ---
 
-### Step 1 — Connect BambooHR to Okta (HR Integration)
+### Step 1 — Connect BambooHR to Okta
 
-**Goal:** Register BambooHR as an application integration in Okta and authenticate the API connection so Okta can import employee data.
+**Goal:** Register BambooHR as an application integration in Okta and authenticate the API connection so Okta can read and import employee data.
 
-1. Sign in to your **Okta Admin Console**.
+1. Sign in to your **Okta Admin Console** (`https://your-org.okta.com/admin`).
 2. Navigate to **Applications** → **Applications** → **Browse App Catalog**.
-3. Search for **BambooHR** and select the integration.
+3. Search for `BambooHR` and select the result.
 4. Click **Add Integration**.
-5. On the **General Settings** tab, enter your BambooHR **subdomain name** (the prefix of your BambooHR URL — e.g. if your URL is `mintis.bamboohr.com`, your subdomain is `mintis`).
+5. On the **General Settings** tab, enter your BambooHR **subdomain name**.
+   - Example: if your BambooHR URL is `wayneenterprise.bamboohr.com`, the subdomain is `wayneenterprise`
 6. Click **Done**.
-7. Navigate to the **Provisioning** tab of the newly added BambooHR integration.
+7. On the new integration page, navigate to the **Provisioning** tab.
 8. Click **Configure API Integration**.
-9. Click **Authenticate with BambooHR** — this will redirect to BambooHR to complete OAuth authorisation.
-10. Confirm the message: *BambooHR API is authenticated.*
+9. Click **Authenticate with BambooHR**.
+   - A BambooHR OAuth window will open — authorise the connection.
+10. Confirm the success message: **BambooHR API is authenticated.**
 11. Click **Save**.
 
-> **What just happened:** Okta now has an authenticated API connection to your BambooHR tenant. It can read employee records, department data, job titles, and group memberships from BambooHR on a scheduled basis.
+> **What this establishes:** Okta now holds authenticated API credentials for your BambooHR tenant. It can read employee records, department assignments, job titles, and group memberships on a scheduled import cycle. BambooHR becomes the authoritative source — Okta becomes the consumer.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 1 - BambooHR App Integration and API Authentication](_screenshots/step1-bamboohr-authenticated.png)
+![Step 1 - BambooHR API Authentication Confirmed in Okta](_screenshots/step1-bamboohr-authenticated.png)
 
 ---
 
 ### Step 2 — Configure Import and Lifecycle Sourcing Rules
 
-**Goal:** Define how Okta imports users from BambooHR and how HR-driven lifecycle events (deactivation, reactivation) flow through to Okta.
+**Goal:** Define the import schedule and specify how HR-driven lifecycle events — deactivation, reactivation — propagate from BambooHR into Okta.
 
-1. On the BambooHR integration **Provisioning** tab, click **Edit** under **To Okta** settings.
-2. Configure the **General** section:
-   - **Schedule import:** Set to **Every hour** (BambooHR does not support real-time attribute sync — scheduled import is required)
-3. Configure **Profile & Lifecycle Sourcing**:
-   - Enable **Allow BambooHR to source Okta users** — this makes BambooHR the authoritative source for user profiles
-   - **When a user is deactivated in BambooHR:** Select **Deactivate the user in Okta**
-   - **When a user is reactivated in BambooHR:** Select **Reactivate suspended Okta users**
-4. Click **Save**.
+1. On the BambooHR integration page, click the **Provisioning** tab.
+2. Under **To Okta**, click **Edit**.
+3. Set the **Schedule import** frequency to **Every hour**.
 
-> **Authoritative source principle:** By enabling BambooHR as the profile source, Okta will not allow manual overrides to attributes that BambooHR owns. Changes to an employee's name, department, or title must be made in BambooHR — they will flow to Okta automatically on the next import cycle. This enforces data integrity and prevents identity drift.
+   > BambooHR does not support real-time webhook sync. A scheduled import is the only available mechanism — plan your offboarding SLA around the maximum one-hour delay this introduces.
+
+4. Under **Profile & Lifecycle Sourcing**, configure:
+
+   | Setting | Value | Rationale |
+   |---|---|---|
+   | Allow BambooHR to source Okta users | **Enabled** | Makes BambooHR the profile authority — Okta will not allow manual overrides to HR-owned attributes |
+   | When a user is deactivated in BambooHR | **Deactivate the user in Okta** | Drives the Leaver workflow automatically |
+   | When a user is reactivated in BambooHR | **Reactivate suspended Okta users** | Supports rehire scenarios |
+
+5. Click **Save**.
+
+> **Identity drift prevention:** When BambooHR is enabled as the profile source, any attempt to manually edit HR-owned attributes in Okta (name, department, title) will be overwritten on the next import. All authoritative changes must originate in BambooHR. This is the correct architecture — it ensures the HR system always remains the single source of truth.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 2 - Import Schedule and Lifecycle Sourcing Configuration](_screenshots/step2-import-lifecycle-config.png)
+![Step 2 - Import Schedule and Lifecycle Sourcing Configured](_screenshots/step2-import-lifecycle-config.png)
 
 ---
 
 ### Step 3 — Import Users from BambooHR
 
-**Goal:** Trigger an immediate import to pull current BambooHR employees into Okta without waiting for the hourly schedule.
+**Goal:** Trigger an immediate full import to pull current BambooHR employees into Okta without waiting for the hourly schedule.
 
 1. On the BambooHR integration page, click the **Import** tab.
-2. Click **Import Now** to trigger a full import.
-3. Wait for the import to complete — import duration depends on the number of employees and groups in BambooHR.
-4. Review the import summary:
-   - New users found
-   - Existing users updated
-   - Groups detected
-5. Select the users to import and set their status to **Managed** (Okta will manage their lifecycle).
-6. Click **Confirm Assignments**.
-7. Navigate to **Directory** → **Groups** to review imported BambooHR groups:
-   - BambooHR-sourced groups will show **Managed by BambooHR** — membership cannot be edited manually in Okta
-   - These groups reflect org structure from BambooHR; you will create your own Okta groups for application access control (Step 4)
+2. Click **Import Now**.
+3. Wait for the import to complete. The summary will show:
+   - **New users found**
+   - **Existing users updated**
+   - **Groups detected**
+4. For each new user detected, select **Managed** to bring them under Okta lifecycle management.
+5. Click **Confirm Assignments**.
+6. Navigate to **Directory** → **Groups** and review the imported BambooHR groups.
 
-> **Key distinction:** BambooHR groups reflect org chart structure. Okta dynamic groups (created in Step 4) are what you use to control application access. Do not rely on BambooHR groups for application assignment — build Okta-native groups with expression rules instead.
+   > BambooHR-sourced groups are read-only in Okta — membership is controlled by BambooHR and cannot be manually edited. These groups reflect org chart structure. You will build your own Okta-native dynamic groups in Step 4 for application access control.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 3 - Import Results and User Confirmation](_screenshots/step3-import-results.png)
+![Step 3 - Import Summary and User Confirmation](_screenshots/step3-import-results.png)
 
 ---
 
 ### Step 4 — Create a Dynamic Group in Okta
 
-**Goal:** Create an Okta group with an expression-based membership rule that automatically includes users meeting specific criteria — in this case, IT department employees with the Senior Developer title.
+**Goal:** Create an Okta group whose membership is automatically managed by an expression rule — adding users whose BambooHR attributes match the target criteria, and removing them when they no longer match.
+
+```
+Dynamic Group Rule — SterlingBank IT Admin
+───────────────────────────────────────────
+Incoming BambooHR profile attributes
+              │
+              ▼
+    Rule evaluation (Okta Expression Language):
+
+    user.department == "IT"
+    AND user.title == "security engineer"
+    ──────────────────────────────────────
+    TRUE  → User added to "SterlingBank IT Admin"
+    FALSE → User not assigned (or removed if previously assigned)
+```
+
+**Steps:**
 
 1. Navigate to **Directory** → **Groups**.
 2. Click **Add Group**.
-3. Enter a descriptive name: `SterlingBank IT Admin`
+3. Enter the group name: `SterlingBank IT Admin`
 4. Click **Save**.
-5. Open the newly created group and click **Manage Rules**.
-6. Click **Add Rule**.
-7. Configure the rule:
-   - **Name:** `IT Senior Developer Rule`
-   - **IF:** Use the Okta Expression Language to define the condition:
+5. Open the group and click **Manage Rules** → **Add Rule**.
+6. Configure the rule:
+   - **Rule name:** `IT security engineer Rule`
+   - **IF (condition):**
      ```
-     user.department == "IT" AND user.title == "Senior Developer"
+     user.department == "IT" AND user.title == "security engineer"
      ```
-   - **THEN assign to:** `SterlingBank IT Admin`
-8. Click **Save Rule**.
-9. Click **Activate** to enable the rule.
-10. Return to the group — Okta will evaluate the rule against all current users and automatically add matching members.
-11. Verify that the expected test user (e.g. Hillman Everest, department = IT, title = Senior Developer) appears as a member.
+   - **THEN assign to group:** `SterlingBank IT Admin`
+7. Click **Save Rule**.
+8. Click **Activate**.
+9. Return to the group — Okta immediately evaluates the rule against all current users.
+10. Confirm that your test employee (e.g. Kerry Jobs, IT / security engineer) appears as a member.
 
-> **Why dynamic groups?** Manual group assignment does not scale and creates ongoing administrative overhead. A dynamic group with an expression rule automatically adds and removes users as their attributes change in BambooHR — no manual intervention required. When Hillman moves from IT to Finance, the rule evaluates on next import and removes him from `SterlingBank IT Admin` automatically.
-
-```
-Dynamic Group Rule Logic
-────────────────────────
-BambooHR Employee Record
-    │
-    ▼
-Okta Profile
-    │
-    ▼
-Rule Evaluation:
-    IF user.department == "IT"
-    AND user.title == "Senior Developer"
-    ─────────────────────────────────────
-    TRUE  → Add to "SterlingBank IT Admin"
-    FALSE → Not assigned / removed if previously assigned
-```
+> **Why dynamic groups, not manual assignment?** When a user's department or title changes in BambooHR, Okta re-evaluates the rule on the next import cycle. If they no longer match, they are automatically removed from the group — and from any applications assigned through it. No manual action required. This is the correct pattern for attribute-driven access control at scale.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 4 - Dynamic Group Rule Configuration and Membership Preview](_screenshots/step4-dynamic-group-rule.png)
+![Step 4 - Dynamic Group Rule and Membership Preview](_screenshots/step4-dynamic-group-rule.png)
 
 ---
 
 ### Step 5 — Get a Free SCIM Test Endpoint (scim.dev)
 
-**Goal:** Provision a public, authenticated SCIM 2.0 sandbox that Okta can push provisioning events to — without building or hosting any server infrastructure.
-
-> **Why scim.dev instead of a custom server?**
-> Okta is a SCIM *client* — it sends outbound HTTP requests whenever a user is created, updated, or deactivated. To observe and validate those requests, you need a SCIM-compliant endpoint that can receive them. `scim.dev` is an online mock SCIM sandbox recommended by Okta. It requires no code, no Docker, no ngrok, and no local server — you get a fully functional, authenticated SCIM 2.0 endpoint in under a minute.
+**Goal:** Obtain a live, authenticated SCIM 2.0 endpoint to receive Okta provisioning events — without building or hosting any server.
 
 ```
 What scim.dev provides
-───────────────────────
-Public SCIM 2.0 base URL: https://api.scim.dev/scim/v2
-Authentication:           HTTP Header (Bearer token — your API key)
-Endpoints available:      /Users   /Groups
-HTTP log viewer:          Real-time display of every request Okta sends
-User inspector:           View created/updated/deactivated user records
-Retention:                Playground persists for your session
+──────────────────────────────────────────────────────────────
+Base URL:        https://api.scim.dev/scim/v2
+Auth mode:       HTTP Header — Bearer <your-api-key>
+Endpoints:       /Users    /Groups
+HTTP log viewer: Real-time log of every request Okta sends,
+                 with full request headers and JSON body
+User inspector:  View, search, and inspect created/updated/
+                 deactivated user records
+Cost:            Free — no account registration required
 ```
+
+> **Why scim.dev instead of a custom server?** Okta is a SCIM *client* — it sends outbound HTTP requests whenever provisioning events occur. All you need is a compliant endpoint to receive and log them. `scim.dev` provides a fully functional SCIM 2.0 sandbox in under a minute, with no code, no Docker, and no tunnel required. It is the fastest way to observe and validate Okta's SCIM behaviour in a lab environment.
 
 **Steps:**
 
 1. Open a new browser tab and navigate to [https://scim.dev](https://scim.dev).
 2. Click **Get an API Key**, accept the terms, and click **Access My Playground**.
-3. On the playground page, locate and **copy your API Key** — you will paste this into Okta in Step 6.
-4. Note your SCIM base URL — it is fixed for all `scim.dev` users:
+3. **Copy your API Key** from the playground page — you will paste this into Okta in Step 7.
+4. Your SCIM base URL is fixed:
    ```
    https://api.scim.dev/scim/v2
    ```
-5. Keep this browser tab open alongside your Okta Admin Console throughout the lab — you will return here to observe live provisioning events.
+5. Keep this tab open throughout the lab — you will return here to observe live HTTP logs for each JML phase test.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 5 - scim.dev Playground with API Key](_screenshots/step5-scimdev-api-key.png)
+![Step 5 - scim.dev Playground and API Key](_screenshots/step5-scimdev-api-key.png)
 
 ---
 
 ### Step 6 — Add the SCIM 2.0 Test App in Okta
 
-**Goal:** Register Okta's built-in SCIM 2.0 catalog test application — a pre-configured integration designed specifically for validating SCIM provisioning workflows.
+**Goal:** Register Okta's built-in SCIM 2.0 catalog test application — a pre-configured integration designed to exercise the full SCIM provisioning surface.
 
-> **Why use the catalog test app rather than a custom integration?**
-> The `SCIM 2.0 Test App (Header Auth)` is an Okta-maintained integration built to exercise the full SCIM provisioning surface — create, update, deactivate, and group push. It removes all SAML configuration overhead so the lab stays focused on provisioning mechanics, which is the core learning objective here.
+> **Why the catalog test app?** The `SCIM 2.0 Test App (Header Auth)` is maintained by Okta specifically for SCIM validation. It removes the SAML configuration requirement so the lab stays focused entirely on provisioning mechanics — Create, Update, Deactivate, and Group Push.
 
 1. In the Okta Admin Console, navigate to **Applications** → **Applications**.
 2. Click **Browse App Catalog**.
 3. Search for `SCIM 2.0 Test App (Header Auth)`.
 4. Select the result and click **Add Integration**.
-5. Enter a descriptive name: `SterlingBank SCIM Practice App`
-6. Click **Next**.
-7. On the **Sign-On Options** tab, leave the default settings.
-8. Click **Done**.
+5. Enter the application name: `SterlingBank SCIM Practice App`
+6. Click **Next** → on the **Sign-On Options** tab, leave defaults → click **Done**.
 
-> The application is now registered in Okta. It has no SCIM endpoint connected yet — that is configured in Step 7.
+The application is now registered in Okta with no SCIM endpoint connected. That is configured in Step 7.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 6 - SCIM 2.0 Test App Added from Okta Catalog](_screenshots/step6-scim-test-app-added.png)
+![Step 6 - SCIM 2.0 Test App Registered in Okta](_screenshots/step6-scim-test-app-added.png)
 
 ---
 
 ### Step 7 — Connect Okta to scim.dev and Enable Provisioning
 
-**Goal:** Point Okta's SCIM client at the `scim.dev` endpoint, authenticate the connection, and enable all three JML provisioning actions.
+**Goal:** Point Okta's SCIM client at the `scim.dev` endpoint, verify the connection, and enable the three provisioning actions that map to each JML lifecycle phase.
 
-#### 7a — Configure the SCIM Connection
+#### 7a — Configure the SCIM API Connection
 
 1. On the `SterlingBank SCIM Practice App` page, click the **Provisioning** tab.
-2. Click **Configure API Integration**.
-3. Check **Enable API Integration**.
-4. Enter the following connection details:
+2. Click **Configure API Integration** → check **Enable API Integration**.
+3. Enter the following:
 
    | Field | Value |
    |---|---|
@@ -339,155 +376,152 @@ Retention:                Playground persists for your session
    | **Authentication Mode** | `HTTP Header` |
    | **Authorization** | Paste the API Key copied from `scim.dev` in Step 5 |
 
-5. Click **Test API Credentials** — a green checkmark confirms the connection is authenticated.
-6. Click **Save**.
+4. Click **Test API Credentials**.
+   - A green checkmark confirms Okta has successfully reached and authenticated with `scim.dev`.
+5. Click **Save**.
 
 ```
-SCIM Connection — What Okta Will Send
-───────────────────────────────────────
+SCIM Communication Model
+─────────────────────────────────────────────────
 Okta (SCIM Client)
     │
-    │  HTTPS requests to https://api.scim.dev/scim/v2
-    │  Authorization: Bearer <your-scim.dev-api-key>
+    │  All requests sent over HTTPS
+    │  Host: api.scim.dev
+    │  Authorization: Bearer <api-key>
     │
-    ▼
-scim.dev SCIM Endpoint
-    │
-    ├── POST   /Users              → Create user (Joiner)
-    ├── PATCH  /Users/{id}         → Update attributes (Mover)
-    ├── PATCH  /Users/{id}         → Deactivate user (Leaver)
-    │         { "active": false }
-    └── GET    /Users              → Okta reconciliation checks
+    ├── POST   /scim/v2/Users          → Create user (Joiner)
+    ├── PATCH  /scim/v2/Users/{id}     → Update attributes (Mover)
+    ├── PATCH  /scim/v2/Users/{id}     → Deactivate user (Leaver)
+    │          body: { "active": false }
+    └── GET    /scim/v2/Users          → Okta reconciliation check
 ```
 
-> **HTTPS is mandatory for SCIM endpoints in production.** SCIM endpoints are privileged — they can create, update, and delete user accounts. `scim.dev` enforces HTTPS natively. When building your own SCIM server in a production environment, ensure it is behind a valid TLS certificate at all times.
+> **HTTPS is non-negotiable for SCIM in production.** SCIM endpoints can create, update, and delete user accounts — they are privileged endpoints equivalent to a directory write API. `scim.dev` enforces HTTPS natively. Never expose a SCIM endpoint over plain HTTP.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 7a - SCIM API Integration Configured and Tested](_screenshots/step7a-scim-api-configured.png)
+![Step 7a - SCIM Connection Configured and Green Credential Test](_screenshots/step7a-scim-api-configured.png)
 
 #### 7b — Enable Provisioning Actions (To App)
 
-7. On the **Provisioning** tab, click **To App** in the left settings panel.
-8. Click **Edit** and enable the following actions:
+6. On the **Provisioning** tab, click **To App** in the left panel.
+7. Click **Edit** and enable:
 
-   | Action | JML Phase | What It Does |
+   | Action | JML Phase | SCIM Call Okta Sends |
    |---|---|---|
-   | ✅ **Create Users** | **Joiner** | Sends `POST /Users` to scim.dev when a user is assigned to the app |
-   | ✅ **Update User Attributes** | **Mover** | Sends `PATCH /Users/{id}` when a user's profile is updated in Okta |
-   | ✅ **Deactivate Users** | **Leaver** | Sends `PATCH /Users/{id}` with `"active": false` when a user is unassigned or deactivated |
+   | ✅ **Create Users** | **Joiner** | `POST /Users` when a user is assigned to the app |
+   | ✅ **Update User Attributes** | **Mover** | `PATCH /Users/{id}` when a user profile is updated in Okta |
+   | ✅ **Deactivate Users** | **Leaver** | `PATCH /Users/{id}` with `"active": false` when a user is removed or deactivated |
 
-9. Leave **Sync Password** unchecked — authentication is handled separately via Okta SSO; passwords are not provisioned via SCIM.
+8. Leave **Sync Password** unchecked — passwords are not managed by SCIM; authentication is handled by Okta SSO.
+9. Do **not** enable **Import Users** or **Import Groups** — `scim.dev` is a test sink, not an authoritative source. Enabling import would create circular data flow that overwrites BambooHR identity data.
 10. Click **Save**.
-
-> **Why exclude import from scim.dev?** `scim.dev` is a test sink — a destination that receives provisioning events. It is not an authoritative identity source. Enabling import from it would create circular data flow, with a mock sandbox overwriting real BambooHR identity data in Okta. The data flow must remain unidirectional: BambooHR → Okta → scim.dev.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 7b - Provisioning Actions Enabled (Create, Update, Deactivate)](_screenshots/step7b-provisioning-actions.png)
+![Step 7b - Provisioning Actions Enabled: Create, Update, Deactivate](_screenshots/step7b-provisioning-actions.png)
 
 ---
 
 ### Step 8 — Assign the Application to the Dynamic Group
 
-**Goal:** Connect the `SterlingBank IT Admin` dynamic group to the SCIM test application so that all group members are automatically provisioned into the scim.dev endpoint.
+**Goal:** Link the `SterlingBank IT Admin` dynamic group to the SCIM application, completing the provisioning chain from BambooHR through Okta to scim.dev.
 
 1. On the `SterlingBank SCIM Practice App` page, navigate to the **Assignments** tab.
 2. Click **Assign** → **Assign to Groups**.
-3. Search for and select `SterlingBank IT Admin`.
-4. Review the attribute mappings presented — accept defaults for now.
-5. Click **Save and Go Back** → **Done**.
-6. Verify that `SterlingBank IT Admin` appears in the **Assignments** tab.
-7. Navigate to **Directory** → **People** and locate your test user (Hillman Everest).
-8. Confirm that `SterlingBank SCIM Practice App` appears in the user's **Applications** tab — this confirms the provisioning chain from BambooHR through the dynamic group to the SCIM endpoint is fully active.
-
-> **Group-based assignment is the correct production pattern.** Assigning applications directly to individual users creates an unmanageable access model at scale and requires manual intervention for every joiner and leaver. Group-based assignment means access is granted and revoked automatically as users enter and leave the dynamic group — driven entirely by BambooHR attribute changes.
+3. Search for `SterlingBank IT Admin` and click **Assign** → accept default attribute mappings → **Save and Go Back** → **Done**.
+4. Confirm `SterlingBank IT Admin` appears in the **Assignments** tab.
+5. Navigate to **Directory** → **People** → open your test user (e.g. Kerry Jobs).
+6. Click the **Applications** tab on the user profile.
+7. Confirm `SterlingBank SCIM Practice App` is listed — this confirms the full provisioning chain is active.
 
 ```
-Complete Provisioning Chain (confirmed at end of Step 8)
+Complete Provisioning Chain — Confirmed at End of Step 8
 ─────────────────────────────────────────────────────────
-BambooHR employee record
-    │  (hourly import)
+BambooHR employee record (dept=IT, title=security engineer)
+    │  hourly scheduled import
     ▼
-Okta user profile
-    │  (dynamic group rule: dept=IT AND title=Senior Developer)
+Okta user profile created/updated
+    │  dynamic group rule evaluated
     ▼
-SterlingBank IT Admin group
-    │  (group assigned to app)
+SterlingBank IT Admin group  ← user automatically added
+    │  group assigned to app
     ▼
-SterlingBank SCIM Practice App
-    │  (SCIM push to scim.dev)
+SterlingBank SCIM Practice App  ← app appears on user profile
+    │  SCIM provisioning event fired
     ▼
-scim.dev /Users endpoint
-    └── User account created / updated / deactivated
+scim.dev /scim/v2/Users  ← POST /Users received and logged
 ```
+
+> **Group-based assignment is the production-correct pattern.** Direct user-to-application assignment does not scale and requires manual intervention for every lifecycle event. Group-based assignment means access follows group membership automatically — and group membership follows BambooHR attributes automatically. The entire chain is attribute-driven with zero manual steps.
 
 #### Screenshot
 <!-- Add your screenshot here -->
-![Step 8 - App Assigned to Dynamic Group; User Provisioning Chain Active](_screenshots/step8-app-group-assigned.png)
+![Step 8 - SterlingBank IT Admin Assigned to App; User Profile Shows App](_screenshots/step8-app-group-assigned.png)
 
 ---
 
 ### Step 9 — Test the Joiner Workflow
 
-**Goal:** Verify that a new employee created in BambooHR flows through Okta's dynamic group rule and triggers a `POST /Users` SCIM provisioning event, visible in scim.dev.
+**Goal:** Create a new employee in BambooHR and confirm the complete provisioning chain fires — from import through dynamic group to SCIM `POST /Users` in scim.dev.
 
 ```
 Joiner Signal Flow
-───────────────────
-BambooHR: new employee (dept=IT, title=Senior Developer)
-    ↓  hourly import (or Import Now)
-Okta: user created → dynamic rule matches → added to SterlingBank IT Admin
-    ↓  group assigned to app → provisioning triggered
-scim.dev: POST /Users received → user record created
+─────────────────────────────────────────────────────────
+BambooHR: new employee (dept=IT, title=security engineer)
+    ↓  Import Now
+Okta: user profile created → rule matches → added to SterlingBank IT Admin
+    ↓  group-to-app assignment triggers SCIM
+scim.dev: POST /Users received → user record created → visible in HTTP logs
 ```
 
 #### 9a — Create a New Employee in BambooHR
 
-1. In BambooHR, create a new employee with:
+1. In BambooHR, create a new employee:
+   - **First Name / Last Name:** any test name
+   - **Email:** a unique test email address
    - **Department:** `IT`
-   - **Job Title:** `Senior Developer`
-   - Complete all required fields (first name, last name, email)
-2. Save the new employee record.
+   - **Job Title:** `security engineer`
+2. Save the record.
 
 #### 9b — Trigger Import in Okta
 
-3. In Okta, navigate to the BambooHR integration → **Import** tab.
-4. Click **Import Now** to pull the new employee without waiting for the hourly schedule.
-5. Review the import summary — confirm the new user is detected.
-6. Confirm the import and set the user to **Managed**.
+3. In Okta, navigate to the BambooHR integration → **Import** tab → **Import Now**.
+4. Wait for the import to complete.
+5. Confirm the new user appears in the summary — set status to **Managed** → **Confirm Assignments**.
 
-#### 9c — Verify Group Membership and Application Assignment
+#### 9c — Verify Group Membership and App Assignment
 
-7. Navigate to **Directory** → **Groups** → `SterlingBank IT Admin`.
-8. Confirm the new user has been automatically added by the dynamic group rule.
-9. Navigate to the user's profile → **Applications** tab.
-10. Confirm `SterlingBank SCIM Practice App` is listed as an assigned application.
+6. Navigate to **Directory** → **Groups** → `SterlingBank IT Admin`.
+7. Confirm the new user appears as a member (added automatically by the dynamic rule).
+8. Navigate to **Directory** → **People** → open the user → **Applications** tab.
+9. Confirm `SterlingBank SCIM Practice App` is listed.
 
 #### 9d — Observe the SCIM Event in scim.dev
 
-11. Switch to the `scim.dev` browser tab.
-12. Navigate to **Logs** → **HTTP Logs**.
-13. Confirm a `POST /Users` request was received from Okta. The payload will resemble:
+10. Switch to the `scim.dev` browser tab.
+11. Navigate to **Logs** → **HTTP Logs**.
+12. Confirm a `POST /Users` request was received. The payload will resemble:
 
     ```json
     {
       "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
-      "userName": "hillman.everest@company.com",
+      "userName": "gordon@office.com",
       "name": {
-        "givenName": "Hillman",
-        "familyName": "Everest"
+        "givenName": "Gordon",
+        "familyName": "Andy"
       },
-      "emails": [{ "value": "hillman.everest@company.com", "primary": true }],
+      "emails": [{ "value": "Gordon@office.com", "primary": true }],
       "active": true
     }
     ```
 
-14. Navigate to **Users** in scim.dev and confirm the user record has been created with the correct attributes.
+13. Navigate to **Users** in scim.dev — confirm the user record is present with `active: true`.
 
-> **What you are observing:** This is the exact JSON payload Okta sends to any SCIM-compliant application — including production systems — when a new user is provisioned. The same request that lands in scim.dev would land in a real enterprise application's SCIM endpoint in production.
+> **What this confirms:** This is the exact JSON payload Okta sends to any SCIM-compliant enterprise application on user provisioning. The `POST /Users` call in scim.dev is identical in structure to what would be sent to a real banking application in production.
 
 #### Screenshots — Joiner Workflow
+
 <!-- Add your screenshot here -->
 ![Step 9a - New Employee Created in BambooHR](_screenshots/step9a-new-employee-bamboohr.png)
 
@@ -495,121 +529,116 @@ scim.dev: POST /Users received → user record created
 ![Step 9b - Okta Import Detects New User](_screenshots/step9b-import-new-user.png)
 
 <!-- Add your screenshot here -->
-![Step 9c - User Added to Dynamic Group, App Assigned](_screenshots/step9c-group-membership-confirmed.png)
+![Step 9c - User Added to SterlingBank IT Admin Group, App Assigned](_screenshots/step9c-group-membership-confirmed.png)
 
 <!-- Add your screenshot here -->
-![Step 9d - scim.dev HTTP Log: POST /Users Received](_screenshots/step9d-scimdev-post-users.png)
+![Step 9d - scim.dev HTTP Log: POST /Users Payload](_screenshots/step9d-scimdev-post-users.png)
 
 <!-- Add your screenshot here -->
-![Step 9d - scim.dev User Record Created](_screenshots/step9d-scimdev-user-created.png)
+![Step 9d - scim.dev Users Tab: User Record Created](_screenshots/step9d-scimdev-user-created.png)
 
 ---
 
 ### Step 10 — Test the Mover Workflow
 
-**Goal:** Verify that a profile change in BambooHR propagates through Okta and triggers a `PATCH /Users/{id}` SCIM update event, observable in scim.dev.
+**Goal:** Update the employee's profile in BambooHR and confirm the change propagates through Okta and fires a `PATCH /Users/{id}` SCIM update in scim.dev.
 
 ```
 Mover Signal Flow
-──────────────────
-BambooHR: employee profile updated (e.g. firstName changed)
-    ↓  hourly import (or Import Now)
-Okta: existing user profile updated in directory
+─────────────────────────────────────────────────────────
+BambooHR: employee firstName changed (e.g. "Gordon" → "Gordon Sunny")
+    ↓  Import Now
+Okta: existing user profile updated in Universal Directory
     ↓  Update User Attributes provisioning action fires
 scim.dev: PATCH /Users/{id} received → user record updated
 ```
 
 #### 10a — Update the Employee in BambooHR
 
-1. In BambooHR, locate the test user's profile.
-2. Update an attribute — for example, change the employee's **First Name** (e.g. from `Hillman` to `Mountain Man`).
-3. Save the updated record.
+1. In BambooHR, open the test employee's profile.
+2. Change the **First Name** (e.g. from `Gordon` to `Gordon Sunny`).
+3. Save the change.
 
 #### 10b — Trigger Import in Okta
 
-4. In Okta, navigate to the BambooHR integration → **Import** tab.
-5. Click **Import Now** to trigger a full import.
-6. Wait for completion — the import summary should show **one existing user updated**.
+4. In Okta, navigate to the BambooHR integration → **Import** tab → **Import Now**.
+5. Wait for completion. The summary should show **one existing user updated**.
 
 #### 10c — Verify Profile Update in Okta
 
-7. Navigate to **Directory** → **People** and locate the updated user.
-8. Confirm the first name has been updated in the Okta user profile to reflect the BambooHR change.
+6. Navigate to **Directory** → **People** → open the user.
+7. Confirm the first name reflects the BambooHR change in the Okta user profile.
 
-#### 10d — Observe the SCIM Update Event in scim.dev
+#### 10d — Observe the SCIM Update in scim.dev
 
-9. Switch to the `scim.dev` browser tab.
-10. Navigate to **Logs** → **HTTP Logs**.
-11. Confirm a `PATCH /Users/{id}` request was received from Okta. The payload will resemble:
+8. Switch to the `scim.dev` tab → **Logs** → **HTTP Logs**.
+9. Confirm a `PATCH /Users/{id}` request was received. The payload will resemble:
 
-    ```json
-    {
-      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
-      "Operations": [
-        {
-          "op": "Replace",
-          "path": "name.givenName",
-          "value": "Mountain Man"
-        }
-      ]
-    }
-    ```
+   ```json
+   {
+     "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+     "Operations": [
+       {
+         "op": "Replace",
+         "path": "name.givenName",
+         "value": "Gordon Sunny"
+       }
+     ]
+   }
+   ```
 
-12. Navigate to **Users** in scim.dev and confirm the user record reflects the updated first name.
+10. Navigate to **Users** in scim.dev — confirm the updated first name is reflected in the user record.
 
-> **Near-real-time attribute sync:** The one-hour BambooHR import schedule means attribute changes propagate within at most one hour in this lab setup. In production environments where tighter sync is required, evaluate whether your HR system supports webhook-based push notifications to Okta — which would trigger imports immediately on record changes rather than on a fixed schedule.
+> **Timing note:** The one-hour BambooHR import schedule means attribute changes have a maximum propagation delay of one hour. In production environments requiring tighter sync, evaluate whether your HR platform supports webhook-based push events to Okta, which would trigger an import immediately on any record change.
 
 #### Screenshots — Mover Workflow
-<!-- Add your screenshot here -->
-![Step 10a - Employee Profile Updated in BambooHR](_screenshots/step10a-profile-updated-bamboohr.png)
 
 <!-- Add your screenshot here -->
-![Step 10b - Okta Import Shows User Updated](_screenshots/step10b-okta-profile-updated.png)
+![Step 10a - Employee Attribute Updated in BambooHR](_screenshots/step10a-profile-updated-bamboohr.png)
 
 <!-- Add your screenshot here -->
-![Step 10c - scim.dev HTTP Log: PATCH /Users Received](_screenshots/step10c-scimdev-patch-users.png)
+![Step 10b - Okta Import Shows One User Updated](_screenshots/step10b-okta-profile-updated.png)
+
+<!-- Add your screenshot here -->
+![Step 10c - scim.dev HTTP Log: PATCH /Users Payload](_screenshots/step10c-scimdev-patch-users.png)
 
 ---
 
 ### Step 11 — Test the Leaver Workflow
 
-**Goal:** Verify that deleting or terminating an employee in BambooHR results in their Okta account being deactivated and a `PATCH /Users/{id}` deactivation event being sent to scim.dev.
+**Goal:** Delete or terminate the employee in BambooHR and confirm the deactivation chain fires — user deactivated in Okta, removed from the group, and a `PATCH /Users/{id}` with `"active": false` sent to scim.dev.
 
 ```
 Leaver Signal Flow
-───────────────────
+─────────────────────────────────────────────────────────
 BambooHR: employee deleted or terminated
-    ↓  hourly import (or Import Now)
+    ↓  Import Now
 Okta: user deactivated → removed from SterlingBank IT Admin group
     ↓  Deactivate Users provisioning action fires
 scim.dev: PATCH /Users/{id} with "active": false received
-          → user account disabled
 ```
 
 #### 11a — Delete or Terminate the Employee in BambooHR
 
-1. In BambooHR, locate the test user's record.
-2. Delete or terminate the employee.
-3. Save the change.
+1. In BambooHR, locate the test employee.
+2. Delete or terminate the employee record and save.
 
 #### 11b — Trigger Import in Okta
 
-4. In Okta, navigate to the BambooHR integration → **Import** tab.
-5. Click **Import Now** to trigger a full import.
-6. The import summary should show **one user removed**.
+3. In Okta, navigate to the BambooHR integration → **Import** tab → **Import Now**.
+4. The import summary should show **one user removed**.
 
 #### 11c — Verify Deactivation in Okta
 
-7. Navigate to **Directory** → **People**.
-8. Locate the user — their status should now show as **Deactivated**.
-9. Confirm they have been automatically removed from the `SterlingBank IT Admin` group.
-10. Confirm `SterlingBank SCIM Practice App` no longer appears in their **Applications** tab.
+5. Navigate to **Directory** → **People**.
+6. Locate the user — their status should now be **Deactivated**.
+7. Confirm they have been automatically removed from `SterlingBank IT Admin`.
+8. Confirm `SterlingBank SCIM Practice App` no longer appears in their **Applications** tab.
 
-#### 11d — Observe the SCIM Deactivation Event in scim.dev
+#### 11d — Observe the SCIM Deactivation in scim.dev
 
-11. Switch to the `scim.dev` browser tab.
-12. Navigate to **Logs** → **HTTP Logs**.
-13. Confirm a `PATCH /Users/{id}` deactivation request was received from Okta. The payload will resemble:
+9. Switch to the `scim.dev` tab → **Logs** → **HTTP Logs**.
+10. Confirm a `PATCH /Users/{id}` deactivation request was received:
 
     ```json
     {
@@ -624,28 +653,29 @@ scim.dev: PATCH /Users/{id} with "active": false received
     }
     ```
 
-14. Navigate to **Users** in scim.dev and confirm the user's `active` field is now `false`.
+11. Navigate to **Users** in scim.dev — confirm the user's `active` field is `false`.
 
 #### 11e — Verify Okta Login Is Denied
 
-15. Open a private/incognito browser window.
-16. Attempt to log in to the Okta End User Dashboard as the deactivated user.
-17. Confirm the login is denied — the account is deactivated and no session can be established.
+12. Open a private/incognito browser window.
+13. Attempt to sign in to the Okta End User Dashboard as the deactivated user.
+14. Confirm the login is denied — the account is deactivated and no session can be established.
 
 ```
-Leaver Workflow Verification Checklist
-────────────────────────────────────────
+Leaver Verification Checklist
+──────────────────────────────
 [ ] Employee deleted/terminated in BambooHR
-[ ] Okta import reflects removal — import summary shows "one user removed"
+[ ] Okta import summary: "one user removed"
 [ ] User status = Deactivated in Okta directory
-[ ] User removed from SterlingBank IT Admin group automatically
-[ ] SterlingBank SCIM Practice App removed from user's Applications tab
-[ ] scim.dev HTTP Log shows PATCH /Users/{id} with "active": false
-[ ] scim.dev user record shows active = false
-[ ] Okta login denied for deactivated user account
+[ ] User removed from SterlingBank IT Admin group
+[ ] SterlingBank SCIM Practice App gone from user's Applications tab
+[ ] scim.dev HTTP log: PATCH /Users/{id} with "active": false received
+[ ] scim.dev Users tab: active = false confirmed on user record
+[ ] Okta login denied for deactivated user
 ```
 
 #### Screenshots — Leaver Workflow
+
 <!-- Add your screenshot here -->
 ![Step 11a - Employee Deleted or Terminated in BambooHR](_screenshots/step11a-employee-deleted-bamboohr.png)
 
@@ -656,61 +686,21 @@ Leaver Workflow Verification Checklist
 ![Step 11c - User Deactivated in Okta Directory](_screenshots/step11c-user-deactivated-okta.png)
 
 <!-- Add your screenshot here -->
-![Step 11d - scim.dev HTTP Log: PATCH /Users active=false](_screenshots/step11d-scimdev-deactivation-patch.png)
+![Step 11d - scim.dev HTTP Log: PATCH active=false Payload](_screenshots/step11d-scimdev-deactivation-patch.png)
 
 <!-- Add your screenshot here -->
-![Step 11d - scim.dev User Record: active=false](_screenshots/step11d-scimdev-user-inactive.png)
-
+![Step 11d - scim.dev Users Tab: active=false Confirmed](_screenshots/step11d-scimdev-user-inactive.png)
 
 ---
 
-## Screenshots
+## JML Workflow Reference
 
-Place your lab screenshots in the `_screenshots/` folder in this repository. Suggested naming:
-
-```
-_screenshots/
-│
-│   # HR Integration (Steps 1–3)
-├── step1-bamboohr-authenticated.png          ← BambooHR API authentication confirmed in Okta
-├── step2-import-lifecycle-config.png         ← Import schedule + lifecycle sourcing settings
-├── step3-import-results.png                  ← Import summary showing users and groups found
-│
-│   # Dynamic Group (Step 4)
-├── step4-dynamic-group-rule.png              ← Group rule expression and membership preview
-│
-│   # SCIM Test Endpoint Setup (Step 5)
-├── step5-scimdev-api-key.png                 ← scim.dev playground with API key visible
-│
-│   # Okta SCIM Test App Registration (Step 6)
-├── step6-scim-test-app-added.png             ← SCIM 2.0 Test App added from Okta catalog
-│
-│   # SCIM Connection and Provisioning Actions (Step 7)
-├── step7a-scim-api-configured.png            ← SCIM connector settings + green credential test
-├── step7b-provisioning-actions.png           ← Create / Update / Deactivate actions enabled
-│
-│   # Group-to-App Assignment (Step 8)
-├── step8-app-group-assigned.png              ← SterlingBank IT Admin assigned to SCIM app
-│
-│   # Joiner Workflow (Step 9)
-├── step9a-new-employee-bamboohr.png          ← New employee record created in BambooHR
-├── step9b-import-new-user.png                ← Okta import detects and confirms new user
-├── step9c-group-membership-confirmed.png     ← User auto-added to group; app assigned
-├── step9d-scimdev-post-users.png             ← scim.dev HTTP log: POST /Users payload
-├── step9d-scimdev-user-created.png           ← scim.dev Users tab: new user record visible
-│
-│   # Mover Workflow (Step 10)
-├── step10a-profile-updated-bamboohr.png      ← Employee attribute updated in BambooHR
-├── step10b-okta-profile-updated.png          ← Okta directory reflects updated attribute
-├── step10c-scimdev-patch-users.png           ← scim.dev HTTP log: PATCH /Users payload
-│
-│   # Leaver Workflow (Step 11)
-├── step11a-employee-deleted-bamboohr.png     ← Employee deleted/terminated in BambooHR
-├── step11b-okta-user-removed.png             ← Okta import summary: one user removed
-├── step11c-user-deactivated-okta.png         ← Okta directory: user status = Deactivated
-├── step11d-scimdev-deactivation-patch.png    ← scim.dev HTTP log: PATCH active=false payload
-├── step11d-scimdev-user-inactive.png         ← scim.dev Users tab: active=false confirmed
-```
+| Phase | BambooHR Trigger | Okta Action | scim.dev / SterlingBank Action |
+|---|---|---|---|
+| **Joiner** | New employee created (dept=IT, title=security engineer) | User imported → rule matches → added to `SterlingBank IT Admin` → app assigned | `POST /Users` — user account created, `active: true` |
+| **Mover (attribute)** | Employee profile updated (name, department, title) | User profile updated in Universal Directory → Update Attributes action fires | `PATCH /Users/{id}` — specific attribute replaced |
+| **Mover (role change)** | Title or department changes so rule no longer matches | User removed from `SterlingBank IT Admin` group | `PATCH /Users/{id}` with `"active": false` — access revoked |
+| **Leaver** | Employee terminated or deleted | User deactivated in Okta → removed from all groups | `PATCH /Users/{id}` with `"active": false` — session invalidated |
 
 ---
 
@@ -718,27 +708,16 @@ _screenshots/
 
 | # | Practice |
 |---|---|
-| 1 | **HR is always the authoritative source** — never create or modify identity records in Okta or downstream apps; all changes originate in HR |
-| 2 | **Use dynamic groups with expression rules** rather than manual group assignment — scales automatically as attributes change |
-| 3 | **SCIM endpoints must use HTTPS** — SCIM can create, update, and delete user accounts; never transmit over plain HTTP |
-| 4 | **Exclude import from resource servers** — users should never flow back from an application into Okta; data flow is unidirectional |
-| 5 | **Use email as the unique user identifier for SCIM** — email is stable, unique, and present across all systems in the chain |
-| 6 | **Assign applications to groups, not individual users** — individual assignment creates an unmanageable model at scale |
-| 7 | **Do not sync passwords via SCIM** — authentication is handled by SAML SSO; password sync creates credential sprawl |
-| 8 | **Test all three JML phases** — a provisioning integration that only works for joiners but fails silently on leavers is a security risk |
-| 9 | **Verify deprovisioning in the resource server**, not just in Okta — confirm the downstream application account is actually disabled, not just Okta |
-| 10 | **Document your import schedule** — BambooHR's hourly sync means access is not revoked instantaSterlingusly; factor this into your offboarding SLA |
-
----
-
-## JML Workflow Reference
-
-| Phase | Trigger Event (BambooHR) | Okta Action | SterlingBank Action |
-|---|---|---|---|
-| **Joiner** | New employee created | User imported → group rule adds to `SterlingBank IT Admin` → app assigned | SCIM creates user account |
-| **Mover** | Employee profile updated (name, title, department) | Attribute updated in Okta profile | SCIM PATCH updates user attributes in SterlingBank |
-| **Mover (role change)** | Department or title changes so rule no longer matches | User removed from `SterlingBank IT Admin` group | SCIM deactivates user in SterlingBank |
-| **Leaver** | Employee terminated or deleted | User deactivated in Okta → removed from all groups | SCIM deactivates user account; session invalidated |
+| 1 | **BambooHR is the only source of truth** — never create or edit HR-owned identity attributes directly in Okta or downstream apps |
+| 2 | **Use dynamic groups with expression rules** — attribute-driven membership eliminates manual access management at scale |
+| 3 | **SCIM endpoints must use HTTPS** — SCIM is a privileged write API; plain HTTP is never acceptable in production |
+| 4 | **Never enable import from resource servers** — data flow must be unidirectional (BambooHR → Okta → app); circular flow corrupts authoritative data |
+| 5 | **Use `userName` or `email` as the SCIM unique identifier** — stable, present across all systems, and avoids matching failures on display name changes |
+| 6 | **Assign applications to groups, not individual users** — direct user assignment breaks the automation model and requires manual intervention for every lifecycle event |
+| 7 | **Do not sync passwords via SCIM** — authentication is handled by Okta SSO; SCIM manages account lifecycle, not credentials |
+| 8 | **Test all three JML phases before signing off** — an integration that provisions joiners but silently fails on leavers is a security liability |
+| 9 | **Verify deactivation in the resource server, not only in Okta** — confirm `active: false` reached scim.dev (or the real app); Okta deactivation alone does not guarantee downstream revocation |
+| 10 | **Account for the hourly import delay in your offboarding SLA** — a terminated employee may retain access for up to one hour if BambooHR uses scheduled sync rather than real-time webhooks |
 
 ---
 
@@ -746,18 +725,17 @@ _screenshots/
 
 | Term | Description |
 |---|---|
-| **JML (Joiner Mover Leaver)** | The three lifecycle phases every employee identity passes through — joining the org, changing roles, and leaving |
-| **Authoritative Source** | The system of record for identity data; all other systems receive data from it, never write back to it |
-| **SCIM (System for Cross-domain Identity Management)** | A REST API standard for automating user provisioning and deprovisioning between identity systems and applications |
-| **Dynamic Group** | An Okta group whose membership is automatically managed by an expression rule rather than manual assignment |
-| **Okta Expression Language** | A syntax for writing attribute-based rules in Okta (e.g. `user.department == "IT"`) |
-| **Provisioning** | The automated creation of user accounts and access in downstream systems |
-| **Deprovisioning** | The automated removal or deactivation of user accounts when access is no longer needed |
-| **Profile Sourcing** | Designating an application (e.g. BambooHR) as the authoritative source for a user's profile attributes in Okta |
-| **SAML** | Standard for SSO authentication — handles login; does not create or remove accounts |
-| **SCIM + SAML** | The full lifecycle pair — SCIM provisions accounts; SAML authenticates sessions |
-| **Identity Drift** | The accumulation of stale, orphaned, or inconsistent identity data across systems when lifecycle events are managed manually |
-| **Scheduled Import** | A periodic sync from the HR system to Okta; BambooHR does not support real-time webhook sync |
+| **JML (Joiner Mover Leaver)** | The three lifecycle phases every employee identity passes through in an organisation |
+| **Authoritative Source** | The system of record for identity data — all other systems consume from it, never write back to it |
+| **SCIM 2.0** | System for Cross-domain Identity Management — a REST API standard for automating user account provisioning and deprovisioning |
+| **Dynamic Group** | An Okta group whose membership is automatically evaluated and managed by an expression rule |
+| **Okta Expression Language** | Attribute-based rule syntax used in Okta group rules (e.g. `user.department == "IT"`) |
+| **Provisioning** | Automated creation of a user account and access entitlements in a downstream application |
+| **Deprovisioning** | Automated removal or deactivation of a user account when access is no longer warranted |
+| **Profile Sourcing** | Designating an application (BambooHR) as the master source for specific user profile attributes in Okta |
+| **scim.dev** | A free, browser-based SCIM 2.0 sandbox used in this lab to receive and inspect Okta's provisioning events |
+| **Identity Drift** | The accumulation of stale, orphaned, or inconsistent identity data when lifecycle events are managed manually across disconnected systems |
+| **Scheduled Import** | A periodic sync from BambooHR to Okta; BambooHR does not support real-time webhook sync, introducing an up-to-one-hour propagation delay |
 
 ---
 
@@ -765,12 +743,13 @@ _screenshots/
 
 - [Okta — BambooHR Integration Guide](https://help.okta.com/en-us/content/topics/provisioning/bamboohr/bamboohr-main.htm)
 - [Okta — SCIM Provisioning Overview](https://developer.okta.com/docs/concepts/scim/)
-- [Okta — Build a SCIM Provisioning Integration](https://developer.okta.com/docs/guides/scim-provisioning-integration-overview/)
+- [Okta — SCIM 2.0 Test App Setup](https://developer.okta.com/docs/guides/scim-provisioning-integration-overview/)
 - [Okta — Group Rules and Expression Language](https://help.okta.com/en-us/content/topics/users-groups-profiles/usgp-about-group-rules.htm)
 - [Okta Expression Language Reference](https://developer.okta.com/docs/reference/okta-expression-language/)
-- [SCIM 2.0 Specification (RFC 7644)](https://datatracker.ietf.org/doc/html/rfc7644)
+- [scim.dev — Free SCIM 2.0 Sandbox](https://scim.dev)
+- [SCIM 2.0 Specification — RFC 7644](https://datatracker.ietf.org/doc/html/rfc7644)
 - [BambooHR API Documentation](https://documentation.bamboohr.com/docs)
 
 ---
 
-*Lab implementing a complete Joiner Mover Leaver identity lifecycle using BambooHR as the authoritative HR source, Okta as the identity broker with dynamic group rules, and a SterlingBank SCIM-provisioned application as the resource server — covering all three lifecycle phases end-to-end.*
+*Lab implementing a complete Joiner Mover Leaver identity lifecycle — BambooHR as the authoritative HR source, Okta as the identity broker with dynamic group rules and SCIM provisioning, and a SterlingBank application validated via the scim.dev SCIM 2.0 sandbox — covering all three lifecycle phases end-to-end with live HTTP log evidence.*
