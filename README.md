@@ -25,5 +25,4 @@ This is not a theoretical gap. Industry research consistently shows it is one of
 
 ## System Architecture
 
-```
-![Okta JML Automation Architecture](jml-architecture.png)
+<img src="jml-architecture.png" alt="Okta JML Automation Architecture" width="100%">
